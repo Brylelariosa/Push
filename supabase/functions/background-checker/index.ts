@@ -45,12 +45,12 @@ function isDueReason(m, now) {
   if (lastUpdated && now - lastUpdated > avg * 2)
     return (now - scrapeAt < DAY) ? 'checked ' + Math.round((now - scrapeAt) / 3600000) + 'h ago' : null;
   if (hist.length < 5) {
-    const interval = now - addedAt < 14 * DAY ? 6 * 3600000 : DAY;
+    // Not enough history to predict schedule — check every 1h so we don't miss early chapters
+    const interval = 3600000; // 1 hour
     return (now - scrapeAt < interval)
-      ? 'checked ' + Math.round((now - scrapeAt) / 3600000) + 'h ago (every ' + Math.round(interval / 3600000) + 'h)'
+      ? 'checked ' + Math.round((now - scrapeAt) / 60000) + 'min ago (every 1h, sparse data)'
       : null;
-  }
-  const day = detectDay(hist);
+  }  const day = detectDay(hist);
   if (day >= 0) {
     const today = jstDay(now);
     const diff = Math.min(Math.abs(today - day), 7 - Math.abs(today - day));
@@ -359,7 +359,7 @@ function recordUpdate(m, now) {
     m.avgUpdateIntervalMs = Math.round(gap / (trimmed.length - 1));
   }
   const avg = m.avgUpdateIntervalMs || DAY;
-  m.nextCheckAt = now + avg - DAY;
+  m.nextCheckAt = now + avg - DAY * 2;
 }
 
 async function vapidJWT(aud) {
