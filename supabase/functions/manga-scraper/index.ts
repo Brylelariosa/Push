@@ -24,7 +24,44 @@ const PROXIES = [
 ];
 
 function ua() { return UAS[Math.floor(Math.random() * UAS.length)]; }
-function log(tag, msg) { const s = '[' + tag + '] ' + msg; logs.push(s); console.log(s); }
+function log(tag, msg) {
+  const ts = new Date().toISOString().slice(11, 19); // HH:MM:SS
+  const s = ts + ' [' + tag + '] ' + msg;
+  logs.push(s);
+  console.log(s);
+}
+
+// Returns null if the manga is due for a check, or a human-readable skip reason.
+// Mirrors isDue() logic but explains why something is skipped.
+function isDueReason(m, now) {
+  const scrapeAt = m.scrapeAt || 0;
+  const lastUpdated = m.lastUpdated || 0;
+  const addedAt = m.addedAt || 0;
+  const hist = m.updateHistory || [];
+  const avg = m.avgUpdateIntervalMs || DAY;
+  if (!scrapeAt) return null; // never checked — always due
+  if (lastUpdated && now - lastUpdated < DAY)
+    return 'updated ' + Math.round((now - lastUpdated) / 3600000) + 'h ago';
+  if (lastUpdated && now - lastUpdated > avg * 2)
+    return (now - scrapeAt < DAY) ? 'checked ' + Math.round((now - scrapeAt) / 3600000) + 'h ago' : null;
+  if (hist.length < 5) {
+    const interval = now - addedAt < 14 * DAY ? 6 * 3600000 : DAY;
+    return (now - scrapeAt < interval)
+      ? 'checked ' + Math.round((now - scrapeAt) / 3600000) + 'h ago (every ' + Math.round(interval / 3600000) + 'h)'
+      : null;
+  }
+  const day = detectDay(hist);
+  if (day >= 0) {
+    const today = jstDay(now);
+    const diff = Math.min(Math.abs(today - day), 7 - Math.abs(today - day));
+    if (diff > 1) return 'not update day (expects ' + ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][day] + ')';
+    return (now - scrapeAt < 2 * 3600000) ? 'checked ' + Math.round((now - scrapeAt) / 3600000) + 'h ago' : null;
+  }
+  const nextCheck = m.nextCheckAt || 0;
+  if (nextCheck && now < nextCheck)
+    return 'next in ' + Math.round((nextCheck - now) / 3600000) + 'h';
+  return null;
+}
 
 async function sb(path, opts) {
   if (!opts) opts = {};
@@ -310,30 +347,7 @@ function detectDay(hist) {
   return counts.indexOf(max);
 }
 
-function isDue(m, now) {
-  const scrapeAt = m.scrapeAt || 0;
-  const lastUpdated = m.lastUpdated || 0;
-  const addedAt = m.addedAt || 0;
-  const hist = m.updateHistory || [];
-  const avg = m.avgUpdateIntervalMs || DAY;
-  if (!scrapeAt) return true;
-  if (lastUpdated && now - lastUpdated < DAY) return false;
-  if (lastUpdated && now - lastUpdated > avg * 2) return now - scrapeAt >= DAY;
-  if (hist.length < 5) {
-    const interval = now - addedAt < 14 * DAY ? 6 * 3600000 : DAY;
-    return now - scrapeAt >= interval;
-  }
-  const day = detectDay(hist);
-  if (day >= 0) {
-    const today = jstDay(now);
-    const diff = Math.min(Math.abs(today - day), 7 - Math.abs(today - day));
-    if (diff > 1) return false;
-    return now - scrapeAt >= 2 * 3600000;
-  }
-  const nextCheck = m.nextCheckAt || 0;
-  if (nextCheck && now < nextCheck) return false;
-  return true;
-}
+function isDue(m, now) { return isDueReason(m, now) === null; }
 
 function recordUpdate(m, now) {
   const hist = (m.updateHistory || []).concat([now]);
@@ -402,6 +416,10 @@ Deno.serve(async function(_req) {
     const mdSet = new Set();
     const urlSet = new Set();
     const now = Date.now();
+    let skippedTotal = 0;
+    let newFoundCount = 0;
+    let failedCount = 0;
+    const skippedSample = []; // up to 5 examples for the log
     for (let i = 0; i < users.length; i++) {
       try {
         const lib = JSON.parse(users[i].lib || '[]');
@@ -410,7 +428,12 @@ Deno.serve(async function(_req) {
           const m = lib[j];
           if (m.archived) continue;
           if (m.readingStatus === 'completed' && m.seriesStatus === 'completed') continue;
-          if (!isDue(m, now)) continue;
+          const skipReason = isDueReason(m, now);
+          if (skipReason !== null) {
+            skippedTotal++;
+            if (skippedSample.length < 5) skippedSample.push(m.title.slice(0, 22) + ' [' + skipReason + ']');
+            continue;
+          }
           if (m.customUrl) {
             urlSet.add(m.customUrl);
             if (!urlTitle.has(m.customUrl)) urlTitle.set(m.customUrl, m.title);
@@ -421,15 +444,18 @@ Deno.serve(async function(_req) {
         }
       } catch(e) { /* skip */ }
     }
-    log('INFO', 'Users:' + users.length + ' MD:' + mdSet.size + ' URLs:' + urlSet.size);
+    log('INFO', 'users:' + users.length + ' to-check:' + (mdSet.size + urlSet.size) + ' MD:' + mdSet.size + ' URL:' + urlSet.size + ' skipped:' + skippedTotal);
+    if (skippedSample.length) log('SKIP', skippedSample.join(' | ') + (skippedTotal > 5 ? ' +' + (skippedTotal - 5) + ' more' : ''));
     const mdIds = Array.from(mdSet);
     for (let i = 0; i < mdIds.length; i += 5) {
       const batch = mdIds.slice(i, i + 5);
       await Promise.all(batch.map(async function(id) {
+        const t1 = Date.now();
         const n = await mdCheck(id);
         mdCache.set(id, n);
         const t = mdTitle.get(id) || id.slice(0, 8);
-        log(n ? 'MD' : 'WARN', t + ' -> ' + (n !== null ? n : 'null'));
+        const ms = Date.now() - t1;
+        log(n !== null ? 'MD' : 'WARN', t + ' -> ' + (n !== null ? n : 'null') + ' (' + ms + 'ms)');
       }));
       if (i + 5 < mdIds.length) await new Promise(function(r) { setTimeout(r, 300); });
     }
@@ -437,11 +463,13 @@ Deno.serve(async function(_req) {
     for (let i = 0; i < urls.length; i += 4) {
       const batch = urls.slice(i, i + 4);
       await Promise.all(batch.map(async function(url) {
+        const t1 = Date.now();
         const r = await urlCheck(url);
         urlCache.set(url, r);
         const t = urlTitle.get(url) || url.replace(/^https?:\/\//, '').split('/')[0];
-        if (r) log('URL', t + ' -> Ch.' + r.ch + ' [' + r.conf + ':' + r.how + ']');
-        else log('WARN', t + ' -> null');
+        const ms = Date.now() - t1;
+        if (r) log('URL', t + ' -> Ch.' + r.ch + ' [' + r.conf + ':' + r.how + '] (' + ms + 'ms)');
+        else log('WARN', t + ' -> null (' + ms + 'ms)');
       }));
       if (i + 4 < urls.length) await new Promise(function(r) { setTimeout(r, 400); });
     }
@@ -472,6 +500,8 @@ Deno.serve(async function(_req) {
           } else {
             m.scrapeOk = false;
             m.scrapeFailCount = (m.scrapeFailCount || 0) + 1;
+            failedCount++;
+            if (m.scrapeFailCount >= 3) log('WARN', m.title + ': scrape fail #' + m.scrapeFailCount);
             changed = true;
           }
           const stored = m.chLatest || 0;
@@ -490,6 +520,7 @@ Deno.serve(async function(_req) {
             m.hasNew = !plan && latest > (m.chRead || 0);
             recordUpdate(m, now);
             changed = true;
+            newFoundCount++;
             const nextStr = m.nextCheckAt ? new Date(m.nextCheckAt).toDateString() : '?';
             log(plan ? 'INFO' : 'NEW', m.title + ': ' + stored + '->' + latest + ' [' + conf + ':' + how + ']' + (plan ? ' [plan]' : '') + ' next:' + nextStr);
             if (!plan) newChs.push(m.title + ' Ch.' + latest);
@@ -516,11 +547,12 @@ Deno.serve(async function(_req) {
       } catch(e) { log('ERR', 'user ' + users[i].id.slice(0, 8) + ': ' + String(e)); }
     }
     const elapsed = Date.now() - t0;
+    log('DONE', 'elapsed:' + elapsed + 'ms checked:' + (mdSet.size + urlSet.size) + ' new:' + newFoundCount + ' failed:' + failedCount + ' notified:' + notified + ' skipped:' + skippedTotal);
     try {
       await sb('/rest/v1/checker_log', {
         method: 'POST',
         headers: { 'Prefer': 'return=minimal' },
-        body: JSON.stringify({ ran_at: Date.now(), elapsed_ms: elapsed, users_checked: users.length, logs: logs.join('\n') }),
+        body: JSON.stringify({ ran_at: t0, elapsed_ms: elapsed, users_checked: users.length, logs: logs.join('\n') }),
       });
     } catch(e) { /* skip */ }
     return new Response(
