@@ -1,0 +1,22 @@
+name: Deploy Edge Function
+
+on:
+  push:
+    branches:
+      - main  # Deployment triggers whenever you push to the main branch
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3  # Pulls your code from GitHub
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Deploy Manga Scraper
+        # Uses the secrets you saved in GitHub Settings
+        run: supabase functions deploy manga-scraper --project-ref ${{ secrets.SUPABASE_PROJECT_ID }}
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
