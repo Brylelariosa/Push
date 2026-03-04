@@ -486,6 +486,8 @@ Deno.serve(async function(_req) {
           let latest = null;
           let conf = 'HIGH';
           let how = 'mangadex';
+          // Was this manga actually attempted this run, or skipped by isDue?
+          const wasChecked = (m.customUrl && urlSet.has(m.customUrl)) || (!m.customUrl && m.mdId && mdSet.has(m.mdId));
           if (m.customUrl) {
             const ur = urlCache.get(m.customUrl) || null;
             if (ur) { latest = ur.ch; conf = ur.conf; how = ur.how; }
@@ -493,16 +495,20 @@ Deno.serve(async function(_req) {
           } else if (m.mdId) {
             latest = mdCache.get(m.mdId) || null;
           }
-          m.scrapeAt = now;
-          if (latest !== null) {
-            m.scrapeOk = true;
-            m.scrapeFailCount = 0;
-          } else {
-            m.scrapeOk = false;
-            m.scrapeFailCount = (m.scrapeFailCount || 0) + 1;
-            failedCount++;
-            if (m.scrapeFailCount >= 3) log('WARN', m.title + ': scrape fail #' + m.scrapeFailCount);
-            changed = true;
+          // Only touch scrape metadata for items actually attempted this run.
+          // Skipped items keep their existing scrapeOk/scrapeAt/scrapeFailCount unchanged.
+          if (wasChecked) {
+            m.scrapeAt = now;
+            if (latest !== null) {
+              m.scrapeOk = true;
+              m.scrapeFailCount = 0;
+            } else {
+              m.scrapeOk = false;
+              m.scrapeFailCount = (m.scrapeFailCount || 0) + 1;
+              failedCount++;
+              if (m.scrapeFailCount >= 3) log('WARN', m.title + ': scrape fail #' + m.scrapeFailCount);
+              changed = true;
+            }
           }
           const stored = m.chLatest || 0;
           const plan = m.readingStatus === 'plan';
